@@ -1,4 +1,4 @@
-import os, time, json, logging, threading, schedule
+ime, json, logging, threading, schedule
 from datetime import datetime
 import pytz, requests
 from flask import Flask, jsonify, request
@@ -366,34 +366,4 @@ def polling_loop():
             if r.status_code == 200:
                 for u in r.json().get("result", []):
                     last_update_id = u.get("update_id", last_update_id)
-                    handle_update(u)
-            else: time.sleep(5)
-        except: time.sleep(5)
-
-# ============================================================
-# Flask Server Entry
-# ============================================================
-app = Flask(__name__)
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    try:
-        update = request.get_json()
-        if update:
-            threading.Thread(target=handle_update, args=(update,)).start()
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/ping", methods=["GET"])
-def ping(): return jsonify({"status": "alive"})
-
-if __name__ == "__main__":
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    if RENDER_URL:
-        log.info(f"🚀 Webhook Mode on port {PORT}")
-        app.run(host="0.0.0.0", port=PORT)
-    else:
-        threading.Thread(target=polling_loop, daemon=True).start()
-        while True: time.sleep(3600)
-            
+                    handle_update
