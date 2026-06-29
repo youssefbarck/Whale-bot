@@ -197,79 +197,7 @@ def handle_message(chat_id, text):
             if fng["value"] < 30 and usdt_dom > 5:
                 msg += "💡 🔴 خوف + USDT مرتفع = السوق هابط، انتظر"
             elif fng["value"] < 35 and usdt_dom < 4.5:
-                msg += "💡 🟢 خوف + USDT منخفض = فرصة شراء محتملة"
-            elif fng["value"] > 70 and usdt_dom < 4:
-                msg += "💡 🟡 جشع + USDT منخفض = قمة قريبة، حذر"
-            elif fng["value"] > 70 and usdt_dom > 5:
-                msg += "💡 🔴 جشع + USDT مرتفع = بدء توزيع، احذر"
-            elif usdt_dom > 5.5:
-                msg += "💡 🟡 USDT يرتفع = السيولة تخرج للدولار"
-            elif usdt_dom < 4:
-                msg += "💡 🟢 USDT ينخفض = السيولة تدخل العملات"
-            else:
-                msg += "💡 ⚪ السوق متوازن"
-        send_telegram(msg, get_keyboard(), chat_id)
-    elif text in ("🔔 تشغيل التنبيهات", "🔕 إيقاف التنبيهات"):
-        en = monitor.toggle()
-        msg = "🔔 <b>التنبيهات مفعّلة</b>" if en else "🔕 <b>التنبيهات متوقفة</b>"
-        send_telegram(msg, get_keyboard(), chat_id)
-    elif text == "❓ حالة البوت":
-        up = time.time() - monitor.start_time
-        h = int(up//3600); m = int((up%3600)//60)
-        st = "🔔 مفعّلة" if monitor.alerts_enabled else "🔕 متوقفة"
-        msg = f"❓ <b>حالة البوت</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n🟢 <b>يعمل</b>\n⏱️ {h}س {m}د\n{st} <b>التنبيهات</b>\n📊 {len(COINS)} عملات\n🎯 حد {ALERT_THRESHOLD_PCT}%\n\n🕐 {datetime.now(tz).strftime('%H:%M:%S')}"
-        send_telegram(msg, get_keyboard(), chat_id)
-    else:
-        send_telegram("استخدم القائمة", get_keyboard(), chat_id)
-
-def send_daily():
-    try:
-        prices = get_prices()
-        msg = f"🌅 <b>ملخص - {datetime.now(tz).strftime('%Y-%m-%d')}</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        for code, info in COINS.items():
-            d = prices.get(code)
-            if d and d["price"] > 0:
-                p = d["price"]; c = d.get("change_24h", 0)
-                e = "🟢" if c >= 0 else "🔴"
-                ps = f"${p:,.2f}" if p >= 1000 else f"${p:,.4f}" if p >= 1 else f"${p:,.6f}" if p >= 0.01 else f"${p:,.8f}"
-                msg += f"{info['icon']} <b>{code}</b>: {ps} {e} {c:+.2f}%\n"
-        dom = get_dominance()
-        if dom:
-            msg += f"\n📊 <b>الاستحواذ:</b>\n"
-            msg += f"  ₿ BTC: {dom['btc_dominance']:.1f}%\n"
-            msg += f"  💵 USDT: {dom['usdt_dominance']:.1f}%\n"
-            msg += f"  Ξ ETH: {dom['eth_dominance']:.1f}%\n"
-        fng = get_fng()
-        if fng: msg += f"😱 {fng['value']}/100 - {fng['classification_ar']}\n"
-        send_telegram(msg)
-    except: pass
-
-last_update_id = 0
-def bot_polling():
-    global last_update_id
-    while True:
-        try:
-            r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                params={"offset": last_update_id+1, "timeout": 25}, timeout=30)
-            if r.status_code == 200:
-                for u in r.json().get("result", []):
-                    last_update_id = u.get("update_id", last_update_id)
-                    m = u.get("message", {})
-                    if m:
-                        cid = m.get("chat", {}).get("id"); txt = m.get("text", "").strip()
-                        if cid and txt:
-                            try: handle_message(cid, txt)
-                            except: pass
-            else: time.sleep(5)
-        except: time.sleep(5)
-
-app = Flask(__name__)
-@app.route("/")
-def home(): return jsonify({"status": "running", "bot": "active"})
-@app.route("/health")
-def health(): return jsonify({"status": "ok"})
-@app.route("/ping")
-def ping(): return jsonify({"pong": True})
+                )
 
 def start_bot():
     if not TELEGRAM_BOT_TOKEN: return
@@ -284,3 +212,4 @@ def start_bot():
 if __name__ == "__main__":
     start_bot()
     app.run(host="0.0.0.0", port=PORT, threaded=True)
+        
