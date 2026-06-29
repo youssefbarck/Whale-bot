@@ -1,0 +1,5 @@
+requests>=2.31.0
+schedule>=1.2.0
+pytz>=2023.3
+flask>=3.0.0
+gunicorn>=21.2.0
