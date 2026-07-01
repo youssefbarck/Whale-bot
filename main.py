@@ -114,33 +114,6 @@ def get_1h_change(coin):
     o, n = h[0][1], h[-1][1]
     return ((n - o) / o) * 100 if o != 0 else 0
 
-def get_trends(timeframe="240"):
-    cache_key = f"trends_{timeframe}"
-    cached = get_cached(cache_key, 600)
-    if cached:
-        return cached
-    trends = {}
-    tickers = [f"BINANCE:{c}USDT|{timeframe}" for c in COINS.keys()]
-    try:
-        payload = {"symbols": {"tickers": tickers, "query": {"types": []}}, "columns": ["Recommend.All"]}
-        r = requests.post("https://scanner.tradingview.com/crypto/scan", json=payload, timeout=10, headers=HEADERS)
-        if r.status_code == 200:
-            for item in r.json().get("data", []):
-                ticker = item.get("s", "")
-                parts = ticker.split(":")
-                if len(parts) > 1:
-                    coin = parts[1].split("USDT")[0]
-                    rec = item.get("d", [0])[0]
-                    if rec > 0.2: trends[coin] = "🟢 صعودي"
-                    elif rec < -0.2: trends[coin] = "🔴 هبوطي"
-                    else: trends[coin] = "⚪ عرضي"
-    except:
-        pass
-    for c in COINS:
-        if c not in trends: trends[c] = "⚪ عرضي"
-    set_cached(cache_key, trends)
-    return trends
-
 def search_coin(symbol):
     try:
         r = requests.get("https://api.coingecko.com/api/v3/search", params={"query": symbol}, timeout=10, headers=HEADERS)
@@ -164,13 +137,6 @@ def send_msg(msg, kb=None, cid=None):
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=p, timeout=15)
     except: pass
 
-def edit_msg(cid, msg_id, text, kb=None):
-    try:
-        p = {"chat_id": cid, "message_id": msg_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        if kb: p["reply_markup"] = json.dumps(kb) if isinstance(kb, dict) else kb
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/editMessageText", json=p, timeout=15)
-    except: pass
-
 def main_kb():
     return {"keyboard": [
         [{"text": "📊 المفضلة"}, {"text": "📋 القائمة العامة"}],
@@ -187,11 +153,6 @@ def coins_kb():
     rows.append([{"text": "✅ تم", "callback_data": "done"}])
     return {"inline_keyboard": rows}
 
-def tf_kb():
-    return {"inline_keyboard": [
-        [{"text": "1H", "callback_data": "tf_60"}, {"text": "4H", "callback_data": "tf_240"}, {"text": "1D", "callback_data": "tf_1D"}, {"text": "3D", "callback_data": "tf_3D"}]
-    ]}
-
 def handle_update(u):
     m = u.get("message", {})
     if m:
@@ -202,36 +163,31 @@ def handle_update(u):
     cb = u.get("callback_query", {})
     if cb:
         cid = cb.get("message", {}).get("chat", {}).get("id")
-        msg_id = cb.get("message", {}).get("message_id")
         d = cb.get("data", "")
         cb_id = cb.get("id", "")
-        if cid and d: handle_cb(cid, d, cb_id, msg_id)
+        if cid and d: handle_cb(cid, d, cb_id)
 
-def build_prices_msg(tf_name="4H"):
+def build_prices_msg():
     pr = get_prices()
-    trends = get_trends({"60": "60", "240": "240", "1D": "1D", "3D": "3D"}.get(tf_name, "240"))
-    msg = f"📊 <b>المفضلة ({tf_name})</b>\n"
+    msg = "📊 <b>المفضلة</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━\n\n"
     for c in sorted(COINS.keys()):
         i = COINS[c]
         d = pr.get(c)
         if d and d["price"] > 0:
             p = d["price"]; c24 = d.get("change_24h", 0); c1 = get_1h_change(c)
-            t = trends.get(c, "⚪")
             a1 = "🟢" if c1 > 0.1 else "🔴" if c1 < -0.1 else "⚪"
             ps = f"${p:,.2f}" if p>=1000 else f"${p:,.4f}" if p>=1 else f"${p:,.6f}" if p>=0.01 else f"${p:,.8f}"
-            msg += f"{i.get('icon','🔹')} <b>{c}</b>: {ps}\n"
-            msg += f"   ┣ 📈 1h: {a1} {c1:+.2f}% | 24h: {c24:+.2f}%\n"
-            msg += f"   ┗ 🎯 الفريم: {t}\n\n"
-    msg += "⏱️ اختر الفريم الزمني:"
+            # رابط TradingView clickable
+            tv_url = f"https://www.tradingview.com/chart/?symbol=BINANCE%3A{c}USDT"
+            msg += f"{i.get('icon','🔹')} <a href='{tv_url}'>{c}</a>: {ps}\n"
+            msg += f"   ┣ 📈 1h: {a1} {c1:+.2f}% | 24h: {c24:+.2f}%\n\n"
     return msg
 
 def build_general_msg():
-    """قائمة عامة بكل العملات المتاحة"""
     pr = get_prices()
     msg = "📋 <b>القائمة العامة</b>\n"
     msg += "━━━━━━━━━━━━━━━━━━\n\n"
-    msg += "📊 <b>كل العملات:</b>\n\n"
     for c in sorted(COINS.keys()):
         i = COINS[c]
         d = pr.get(c)
@@ -240,9 +196,9 @@ def build_general_msg():
             e = "🟢" if c24 >= 0 else "🔴"
             ps = f"${p:,.2f}" if p>=1000 else f"${p:,.4f}" if p>=1 else f"${p:,.6f}" if p>=0.01 else f"${p:,.8f}"
             watch = "👁️" if c in watched_coins else "➖"
-            msg += f"{watch} {i.get('icon','🔹')} <b>{c}</b>: {ps} {e} {c24:+.2f}%\n"
+            tv_url = f"https://www.tradingview.com/chart/?symbol=BINANCE%3A{c}USDT"
+            msg += f"{watch} {i.get('icon','🔹')} <a href='{tv_url}'>{c}</a>: {ps} {e} {c24:+.2f}%\n"
     msg += "\n👁️ = تحت المراقبة | ➖ = غير مراقبة"
-    msg += "\n\n💡 استخدم 🔔 التنبيهات لإدارة المراقبة"
     return msg
 
 def handle_msg(cid, txt):
@@ -255,7 +211,7 @@ def handle_msg(cid, txt):
         send_msg(msg, main_kb(), cid)
     elif txt == "📊 المفضلة":
         send_msg("⏳ جاري الجلب...", cid=cid)
-        send_msg(build_prices_msg("4H"), tf_kb(), cid)
+        send_msg(build_prices_msg(), main_kb(), cid)
     elif txt == "📋 القائمة العامة":
         send_msg("⏳ جاري الجلب...", cid=cid)
         send_msg(build_general_msg(), main_kb(), cid)
@@ -294,7 +250,7 @@ def handle_coin_input(cid, text):
     msg = f"✅ <b>تمت إضافة {symbol}</b>\n🔹 {coin_name}"
     send_msg(msg, main_kb(), cid)
 
-def handle_cb(cid, d, cb_id, msg_id):
+def handle_cb(cid, d, cb_id):
     global watched_coins
     if d.startswith("toggle_"):
         c = d.replace("toggle_", "")
@@ -309,15 +265,8 @@ def handle_cb(cid, d, cb_id, msg_id):
         except: pass
         wl = ", ".join(sorted(watched_coins)) or "لا أحد"
         send_msg(f"✅ <b>تم الحفظ</b>\n👁️: {wl}", main_kb(), cid)
-    elif d.startswith("tf_"):
-        tf = d.replace("tf_", "")
-        tf_name = {"60": "1H", "240": "4H", "1D": "1D", "3D": "3D"}.get(tf, "4H")
-        try: requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": f"الفريم: {tf_name}"}, timeout=10)
-        except: pass
-        edit_msg(cid, msg_id, build_prices_msg(tf_name), tf_kb())
 
 def monitor_loop():
-    """مراقب التغيرات المفاجئة فقط"""
     time.sleep(10)
     last_alerts = {}
     while True:
@@ -333,37 +282,25 @@ def monitor_loop():
                 if not hist: continue
                 ref = hist[0][1]
                 if ref == 0: continue
-                
                 ch = ((p - ref) / ref) * 100
-                
-                # تنبيه فقط عند تغير مفاجئ ≥ 2% مع فترة تهدئة 30 دقيقة
                 if abs(ch) >= ALERT_THRESHOLD:
                     if now - last_alerts.get(c, 0) < ALERT_COOLDOWN:
                         continue
                     last_alerts[c] = now
-                    
                     info = COINS.get(c, {"name_ar": c})
                     e = "🟢" if ch > 0 else "🔴"
                     a = "📈" if ch > 0 else "📉"
-                    
                     m = f"{e} <b>تنبيه - {info.get('name_ar', c)} ({c})</b>\n"
                     m += "━━━━━━━━━━━━━━━━━━\n\n"
                     m += f"{a} <b>التغير المفاجئ:</b> {ch:+.2f}%\n"
                     m += f"💲 <b>السعر:</b> ${p:,.4f}\n\n"
-                    
-                    if abs(ch) >= 5:
-                        m += "⚡ <b>حركة قوية جداً!</b>\n"
-                    elif abs(ch) >= 3:
-                        m += "📊 <b>حركة قوية</b>\n"
-                    else:
-                        m += "📉 <b>حركة ملحوظة</b>\n"
-                    
+                    if abs(ch) >= 5: m += "⚡ <b>حركة قوية جداً!</b>\n"
+                    elif abs(ch) >= 3: m += "📊 <b>حركة قوية</b>\n"
+                    else: m += "📉 <b>حركة ملحوظة</b>\n"
                     m += f"\n🕐 {datetime.now(tz).strftime('%Y-%m-%d %H:%M')}"
                     m += "\n\n⚠️ <i>ليس نصيحة استثمارية</i>"
-                    
                     send_msg(m)
                     hist[0] = (time.time(), p)
-                    
             time.sleep(CHECK_INTERVAL)
         except:
             time.sleep(60)
