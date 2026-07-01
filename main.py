@@ -1,12 +1,6 @@
-import os
-import time
-import json
-import logging
-import threading
-import schedule
+import os, time, json, logging, threading, schedule
 from datetime import datetime
-import pytz
-import requests
+import pytz, requests
 from flask import Flask, jsonify, request
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -22,9 +16,10 @@ COINS = {
     "ROSE": {"name_ar": "أواسيس",   "icon": "✿", "id": "oasis-network"},
     "APT":  {"name_ar": "أبتوس",    "icon": "◆", "id": "aptos"},
 }
-ALERT_THRESHOLD = 2.0
+
 CHECK_INTERVAL = 300
-DAILY_HOUR = 8
+ALERT_THRESHOLD = 2.0
+ALERT_COOLDOWN = 1800
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("Bot")
@@ -34,7 +29,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 _cache = {}
 price_history = {}
 watched_coins = set()
-_last_usdt_dom = None
 _start_time = time.time()
 _user_state = {}
 CUSTOM_FILE = "/tmp/custom_coins.json"
@@ -120,40 +114,32 @@ def get_1h_change(coin):
     o, n = h[0][1], h[-1][1]
     return ((n - o) / o) * 100 if o != 0 else 0
 
-def get_dominance():
-    cached = get_cached("dom", 1800)
+def get_trends(timeframe="240"):
+    cache_key = f"trends_{timeframe}"
+    cached = get_cached(cache_key, 600)
     if cached:
         return cached
+    trends = {}
+    tickers = [f"BINANCE:{c}USDT|{timeframe}" for c in COINS.keys()]
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=15, headers=HEADERS)
+        payload = {"symbols": {"tickers": tickers, "query": {"types": []}}, "columns": ["Recommend.All"]}
+        r = requests.post("https://scanner.tradingview.com/crypto/scan", json=payload, timeout=10, headers=HEADERS)
         if r.status_code == 200:
-            d = r.json()["data"]
-            mcp = d.get("market_cap_percentage", {})
-            res = {"btc": mcp.get("btc", 0), "eth": mcp.get("eth", 0), "usdt": mcp.get("usdt", 0),
-                   "total_mcap": d.get("total_market_cap", {}).get("usd", 0),
-                   "mcap_change": d.get("market_cap_change_percentage_24h_usd", 0)}
-            set_cached("dom", res)
-            return res
+            for item in r.json().get("data", []):
+                ticker = item.get("s", "")
+                parts = ticker.split(":")
+                if len(parts) > 1:
+                    coin = parts[1].split("USDT")[0]
+                    rec = item.get("d", [0])[0]
+                    if rec > 0.2: trends[coin] = "🟢 صعودي"
+                    elif rec < -0.2: trends[coin] = "🔴 هبوطي"
+                    else: trends[coin] = "⚪ عرضي"
     except:
         pass
-    return None
-
-def get_fng():
-    cached = get_cached("fng", 3600)
-    if cached:
-        return cached
-    try:
-        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-        if r.status_code == 200:
-            d = r.json()["data"][0]
-            v = int(d["value"])
-            cls = "😨 خوف شديد" if v<=25 else "😟 خوف" if v<=45 else "😐 محايد" if v<=55 else "😄 جشع" if v<=75 else "🤑 جشع شديد"
-            res = {"value": v, "cls": cls}
-            set_cached("fng", res)
-            return res
-    except:
-        pass
-    return None
+    for c in COINS:
+        if c not in trends: trends[c] = "⚪ عرضي"
+    set_cached(cache_key, trends)
+    return trends
 
 def search_coin(symbol):
     try:
@@ -171,20 +157,24 @@ def search_coin(symbol):
 
 def send_msg(msg, kb=None, cid=None):
     t = cid or CHAT_ID
-    if not t or not TOKEN:
-        return
+    if not t or not TOKEN: return
     try:
         p = {"chat_id": t, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True}
-        if kb:
-            p["reply_markup"] = kb
+        if kb: p["reply_markup"] = json.dumps(kb) if isinstance(kb, dict) else kb
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=p, timeout=15)
-    except:
-        pass
+    except: pass
+
+def edit_msg(cid, msg_id, text, kb=None):
+    try:
+        p = {"chat_id": cid, "message_id": msg_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if kb: p["reply_markup"] = json.dumps(kb) if isinstance(kb, dict) else kb
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/editMessageText", json=p, timeout=15)
+    except: pass
 
 def main_kb():
     return {"keyboard": [
-        [{"text": "📊 الأسعار"}, {"text": "📈 الاستحواذ"}],
-        [{"text": "🔔 التنبيهات"}, {"text": "➕ إضافة عملة"}, {"text": "❓ حالة"}]
+        [{"text": "📊 المفضلة"}, {"text": "📋 القائمة العامة"}],
+        [{"text": "🔔 التنبيهات"}, {"text": "➕ إضافة عملة"}]
     ], "resize_keyboard": True, "is_persistent": True}
 
 def coins_kb():
@@ -192,29 +182,68 @@ def coins_kb():
     for c in sorted(COINS.keys()):
         i = "✅" if c in watched_coins else "➕"
         row.append({"text": f"{i} {c}", "callback_data": f"toggle_{c}"})
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+        if len(row) == 3: rows.append(row); row = []
+    if row: rows.append(row)
     rows.append([{"text": "✅ تم", "callback_data": "done"}])
     return {"inline_keyboard": rows}
+
+def tf_kb():
+    return {"inline_keyboard": [
+        [{"text": "1H", "callback_data": "tf_60"}, {"text": "4H", "callback_data": "tf_240"}, {"text": "1D", "callback_data": "tf_1D"}, {"text": "3D", "callback_data": "tf_3D"}]
+    ]}
 
 def handle_update(u):
     m = u.get("message", {})
     if m:
         cid = m.get("chat", {}).get("id")
         txt = m.get("text", "").strip()
-        if cid and txt:
-            handle_msg(cid, txt)
+        if cid and txt: handle_msg(cid, txt)
         return
     cb = u.get("callback_query", {})
     if cb:
         cid = cb.get("message", {}).get("chat", {}).get("id")
+        msg_id = cb.get("message", {}).get("message_id")
         d = cb.get("data", "")
         cb_id = cb.get("id", "")
-        if cid and d:
-            handle_cb(cid, d, cb_id)
+        if cid and d: handle_cb(cid, d, cb_id, msg_id)
+
+def build_prices_msg(tf_name="4H"):
+    pr = get_prices()
+    trends = get_trends({"60": "60", "240": "240", "1D": "1D", "3D": "3D"}.get(tf_name, "240"))
+    msg = f"📊 <b>المفضلة ({tf_name})</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n\n"
+    for c in sorted(COINS.keys()):
+        i = COINS[c]
+        d = pr.get(c)
+        if d and d["price"] > 0:
+            p = d["price"]; c24 = d.get("change_24h", 0); c1 = get_1h_change(c)
+            t = trends.get(c, "⚪")
+            a1 = "🟢" if c1 > 0.1 else "🔴" if c1 < -0.1 else "⚪"
+            ps = f"${p:,.2f}" if p>=1000 else f"${p:,.4f}" if p>=1 else f"${p:,.6f}" if p>=0.01 else f"${p:,.8f}"
+            msg += f"{i.get('icon','🔹')} <b>{c}</b>: {ps}\n"
+            msg += f"   ┣ 📈 1h: {a1} {c1:+.2f}% | 24h: {c24:+.2f}%\n"
+            msg += f"   ┗ 🎯 الفريم: {t}\n\n"
+    msg += "⏱️ اختر الفريم الزمني:"
+    return msg
+
+def build_general_msg():
+    """قائمة عامة بكل العملات المتاحة"""
+    pr = get_prices()
+    msg = "📋 <b>القائمة العامة</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n\n"
+    msg += "📊 <b>كل العملات:</b>\n\n"
+    for c in sorted(COINS.keys()):
+        i = COINS[c]
+        d = pr.get(c)
+        if d and d["price"] > 0:
+            p = d["price"]; c24 = d.get("change_24h", 0)
+            e = "🟢" if c24 >= 0 else "🔴"
+            ps = f"${p:,.2f}" if p>=1000 else f"${p:,.4f}" if p>=1 else f"${p:,.6f}" if p>=0.01 else f"${p:,.8f}"
+            watch = "👁️" if c in watched_coins else "➖"
+            msg += f"{watch} {i.get('icon','🔹')} <b>{c}</b>: {ps} {e} {c24:+.2f}%\n"
+    msg += "\n👁️ = تحت المراقبة | ➖ = غير مراقبة"
+    msg += "\n\n💡 استخدم 🔔 التنبيهات لإدارة المراقبة"
+    return msg
 
 def handle_msg(cid, txt):
     if _user_state.get(cid) == "waiting_for_coin":
@@ -222,106 +251,79 @@ def handle_msg(cid, txt):
         return
     if txt == "/start":
         msg = "🤖 <b>مرحباً</b>\n📊 بوت متابعة العملات\n"
-        msg += f"👁️ تنبيه عند ≥ {ALERT_THRESHOLD}%\n"
         msg += f"🎯 عملاتك: {', '.join(sorted(COINS.keys()))}"
         send_msg(msg, main_kb(), cid)
-    elif txt == "📊 الأسعار":
+    elif txt == "📊 المفضلة":
         send_msg("⏳ جاري الجلب...", cid=cid)
-        pr = get_prices()
-        msg = "📊 <b>الأسعار</b>\n━━━━━━━━━━━━━\n"
-        for c in sorted(COINS.keys()):
-            i = COINS[c]
-            d = pr.get(c)
-            if d and d["price"] > 0:
-                p = d["price"]; c24 = d.get("change_24h", 0); c1 = get_1h_change(c)
-                a1 = "🟢" if c1 > 0.1 else "🔴" if c1 < -0.1 else "⚪"
-                ps = f"${p:,.2f}" if p>=1000 else f"${p:,.4f}" if p>=1 else f"${p:,.6f}" if p>=0.01 else f"${p:,.8f}"
-                msg += f"{i.get('icon','🔹')} <b>{c}</b>: {ps}\n  1h: {a1} {c1:+.2f}% | 24h: {c24:+.2f}%\n"
-        send_msg(msg, main_kb(), cid)
-    elif txt == "📈 الاستحواذ":
+        send_msg(build_prices_msg("4H"), tf_kb(), cid)
+    elif txt == "📋 القائمة العامة":
         send_msg("⏳ جاري الجلب...", cid=cid)
-        dom = get_dominance(); fng = get_fng()
-        msg = "📈 <b>الاستحواذ</b>\n━━━━━━━━━━━━━\n"
-        if dom:
-            msg += f"₿ BTC: {dom['btc']:.1f}%\n💵 USDT: {dom['usdt']:.1f}%\nΞ ETH: {dom['eth']:.1f}%\n"
-            msg += f"💰 السوق: ${dom['total_mcap']/1e9:.0f}B ({dom['mcap_change']:+.2f}%)\n\n"
-        if fng:
-            v = fng["value"]
-            msg += f"😱 {v}/100 - {fng['cls']}\n"
-            msg += "🟩"*int(v/10) + "⬜"*(10-int(v/10)) + "\n\n"
-        if dom and fng:
-            v_val, usdt = fng["value"], dom["usdt"]
-            if v_val < 30 and usdt > 5: msg += "💡 🔴 خوف + USDT مرتفع = هابط"
-            elif v_val < 35 and usdt < 4.5: msg += "💡 🟢 خوف + USDT منخفض = فرصة شراء"
-            elif v_val > 70 and usdt < 4: msg += "💡 🟡 جشع + USDT منخفض = قمة"
-            elif usdt > 5.5: msg += "💡 🟡 USDT يرتفع"
-            elif usdt < 4: msg += "💡 🟢 USDT ينخفض"
-            else: msg += "💡 ⚪ متوازن"
-        send_msg(msg, main_kb(), cid)
+        send_msg(build_general_msg(), main_kb(), cid)
     elif txt == "🔔 التنبيهات":
-        send_msg("🔔 <b>التنبيهات</b>\n✅ مفعّل | ➕ غير مفعّل", coins_kb(), cid)
+        msg = "🔔 <b>إدارة التنبيهات</b>\n"
+        msg += "━━━━━━━━━━━━━━━━━━\n\n"
+        msg += "⚠️ تنبيه فقط عند تغير مفاجئ ≥ 2%\n\n"
+        msg += "✅ = مفعّل | ➕ = غير مفعّل\n"
+        send_msg(msg, coins_kb(), cid)
     elif txt == "➕ إضافة عملة":
         _user_state[cid] = "waiting_for_coin"
-        send_msg("➕ <b>أرسل رمز العملة</b>\nمثال: <code>DOGE</code> أو <code>SOL</code>", None, cid)
-    elif txt == "❓ حالة":
-        up = time.time() - _start_time
-        h = int(up // 3600); m = int((up % 3600) // 60)
-        send_msg(f"❓ <b>الحالة</b>\n🟢 يعمل\n⏱️ {h}س {m}د\n📊 {len(COINS)} عملة\n👁️ {len(watched_coins)} مراقبة", main_kb(), cid)
+        msg = "➕ <b>إضافة عملة جديدة</b>\n"
+        msg += "━━━━━━━━━━━━━━━━━━\n\n"
+        msg += "📝 أرسل رمز العملة:\n"
+        msg += "مثال: <code>DOGE</code> أو <code>SOL</code>"
+        send_msg(msg, None, cid)
     else:
-        send_msg("استخدم القائمة", main_kb(), cid)
+        send_msg("استخدم القائمة بالأسفل", main_kb(), cid)
 
 def handle_coin_input(cid, text):
     _user_state[cid] = None
     symbol = text.upper().strip().replace("USDT", "").replace("/", "")
     if symbol in COINS:
-        send_msg(f"ℹ️ {symbol} موجودة مسبقاً", main_kb(), cid)
+        send_msg(f"ℹ️ <b>{symbol}</b> موجودة مسبقاً", main_kb(), cid)
         return
-    send_msg(f"⏳ جاري البحث عن {symbol}...", None, cid)
+    send_msg(f"⏳ جاري البحث عن <b>{symbol}</b>...", None, cid)
     coin_id, coin_name = search_coin(symbol)
     if not coin_id:
-        send_msg(f"❌ لم يتم العثور على {symbol}", main_kb(), cid)
+        send_msg(f"❌ لم يتم العثور على <b>{symbol}</b>", main_kb(), cid)
         return
     COINS[symbol] = {"name_ar": coin_name, "icon": "🔹", "id": coin_id, "custom": True}
     watched_coins.add(symbol)
     price_history[symbol] = []
     save_custom()
-    if "prices" in _cache:
-        del _cache["prices"]
-    send_msg(f"✅ <b>تمت إضافة {symbol}</b>\n🔹 {coin_name}", main_kb(), cid)
+    if "prices" in _cache: del _cache["prices"]
+    msg = f"✅ <b>تمت إضافة {symbol}</b>\n🔹 {coin_name}"
+    send_msg(msg, main_kb(), cid)
 
-def handle_cb(cid, d, cb_id):
+def handle_cb(cid, d, cb_id, msg_id):
     global watched_coins
     if d.startswith("toggle_"):
         c = d.replace("toggle_", "")
-        if c in watched_coins:
-            watched_coins.discard(c)
-        else:
-            watched_coins.add(c)
-        try:
-            requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "تم"}, timeout=10)
-        except:
-            pass
-        send_msg("🔔 <b>التنبيهات</b>\n✅ مفعّل | ➕ غير مفعّل", coins_kb(), cid)
+        if c in watched_coins: watched_coins.discard(c)
+        else: watched_coins.add(c)
+        try: requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "تم"}, timeout=10)
+        except: pass
+        msg = "🔔 <b>إدارة التنبيهات</b>\n━━━━━━━━━━━━━━━━━━\n✅ مفعّل | ➕ غير مفعّل\n"
+        send_msg(msg, coins_kb(), cid)
     elif d == "done":
-        try:
-            requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "✅ تم"}, timeout=10)
-        except:
-            pass
-        send_msg(f"✅ <b>تم الحفظ</b>\n👁️: {', '.join(sorted(watched_coins))}", main_kb(), cid)
+        try: requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "✅ تم"}, timeout=10)
+        except: pass
+        wl = ", ".join(sorted(watched_coins)) or "لا أحد"
+        send_msg(f"✅ <b>تم الحفظ</b>\n👁️: {wl}", main_kb(), cid)
+    elif d.startswith("tf_"):
+        tf = d.replace("tf_", "")
+        tf_name = {"60": "1H", "240": "4H", "1D": "1D", "3D": "3D"}.get(tf, "4H")
+        try: requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": f"الفريم: {tf_name}"}, timeout=10)
+        except: pass
+        edit_msg(cid, msg_id, build_prices_msg(tf_name), tf_kb())
 
 def monitor_loop():
-    global _last_usdt_dom
+    """مراقب التغيرات المفاجئة فقط"""
     time.sleep(10)
+    last_alerts = {}
     while True:
         try:
             pr = get_prices()
-            dom = get_dominance()
-            u_r, u_f = False, False
-            if dom and _last_usdt_dom is not None:
-                diff = dom["usdt"] - _last_usdt_dom
-                if diff > 0.1: u_r = True
-                elif diff < -0.1: u_f = True
-            if dom: _last_usdt_dom = dom["usdt"]
+            now = time.time()
             for c in watched_coins:
                 if c not in pr: continue
                 d = pr.get(c)
@@ -331,54 +333,48 @@ def monitor_loop():
                 if not hist: continue
                 ref = hist[0][1]
                 if ref == 0: continue
+                
                 ch = ((p - ref) / ref) * 100
+                
+                # تنبيه فقط عند تغير مفاجئ ≥ 2% مع فترة تهدئة 30 دقيقة
                 if abs(ch) >= ALERT_THRESHOLD:
+                    if now - last_alerts.get(c, 0) < ALERT_COOLDOWN:
+                        continue
+                    last_alerts[c] = now
+                    
                     info = COINS.get(c, {"name_ar": c})
                     e = "🟢" if ch > 0 else "🔴"
                     a = "📈" if ch > 0 else "📉"
-                    m = f"{e} <b>تنبيه - {info.get('name_ar', c)} ({c})</b>\n━━━━━━━━━━━━━\n"
-                    m += f"{a} <b>تغير:</b> {ch:+.2f}%\n💲 <b>السعر:</b> ${p:,.4f}\n\n"
-                    if ch > 0 and u_f: m += "💡 🟢🟢 صعودي قوي"
-                    elif ch < 0 and u_r: m += "💡 🔴🔴 هبوطي قوي"
-                    else: m += "💡 📊 حركة سعرية"
-                    m += f"\n\n🕐 {datetime.now(tz).strftime('%H:%M')}"
+                    
+                    m = f"{e} <b>تنبيه - {info.get('name_ar', c)} ({c})</b>\n"
+                    m += "━━━━━━━━━━━━━━━━━━\n\n"
+                    m += f"{a} <b>التغير المفاجئ:</b> {ch:+.2f}%\n"
+                    m += f"💲 <b>السعر:</b> ${p:,.4f}\n\n"
+                    
+                    if abs(ch) >= 5:
+                        m += "⚡ <b>حركة قوية جداً!</b>\n"
+                    elif abs(ch) >= 3:
+                        m += "📊 <b>حركة قوية</b>\n"
+                    else:
+                        m += "📉 <b>حركة ملحوظة</b>\n"
+                    
+                    m += f"\n🕐 {datetime.now(tz).strftime('%Y-%m-%d %H:%M')}"
+                    m += "\n\n⚠️ <i>ليس نصيحة استثمارية</i>"
+                    
                     send_msg(m)
                     hist[0] = (time.time(), p)
+                    
             time.sleep(CHECK_INTERVAL)
         except:
             time.sleep(60)
 
 def self_ping():
-    if not RENDER_URL:
-        return
+    if not RENDER_URL: return
     time.sleep(30)
     while True:
-        try:
-            requests.get(f"{RENDER_URL}/ping", timeout=10)
-        except:
-            pass
+        try: requests.get(f"{RENDER_URL}/ping", timeout=10)
+        except: pass
         time.sleep(600)
-
-def send_daily():
-    try:
-        pr = get_prices()
-        dom = get_dominance()
-        fng = get_fng()
-        msg = f"🌅 <b>ملخص - {datetime.now(tz).strftime('%Y-%m-%d')}</b>\n━━━━━━━━━━━━━\n\n"
-        for c in sorted(COINS.keys()):
-            d = pr.get(c)
-            if d and d["price"] > 0:
-                p = d["price"]; c24 = d.get("change_24h", 0)
-                e = "🟢" if c24 >= 0 else "🔴"
-                ps = f"${p:,.2f}" if p>=1000 else f"${p:,.4f}" if p>=1 else f"${p:,.6f}" if p>=0.01 else f"${p:,.8f}"
-                msg += f"<b>{c}</b>: {ps} {e} {c24:+.2f}%\n"
-        if dom:
-            msg += f"\n₿ BTC: {dom['btc']:.1f}%\n💵 USDT: {dom['usdt']:.1f}%\n"
-        if fng:
-            msg += f"😱 {fng['value']}/100\n"
-        send_msg(msg)
-    except:
-        pass
 
 app = Flask(__name__)
 
@@ -386,50 +382,38 @@ app = Flask(__name__)
 def webhook():
     try:
         u = request.get_json()
-        if u:
-            threading.Thread(target=handle_update, args=(u,)).start()
-    except:
-        pass
+        if u: threading.Thread(target=handle_update, args=(u,)).start()
+    except: pass
     return jsonify({"ok": True})
 
 @app.route("/")
-def home():
-    return jsonify({"status": "running", "coins": list(COINS.keys())})
-
+def home(): return jsonify({"status": "running", "coins": list(COINS.keys())})
 @app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
-
+def health(): return jsonify({"status": "ok"})
 @app.route("/ping")
-def ping():
-    return jsonify({"pong": True})
+def ping(): return jsonify({"pong": True})
 
 def start_bot():
     global _started, _start_time
-    if _started:
-        return
+    if _started: return
     _started = True
     _start_time = time.time()
-    if not TOKEN:
-        return
+    if not TOKEN: return
     load_custom()
     wh = False
     if RENDER_URL:
         try:
             r = requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook", params={"url": f"{RENDER_URL}/webhook"}, timeout=10)
-            if r.status_code == 200 and r.json().get("ok"):
-                wh = True
-        except:
-            pass
-    send_msg(f"🚀 <b>تم التشغيل</b>\n📊 عملات: {', '.join(sorted(COINS.keys()))}\n📥 أرسل /start")
+            if r.status_code == 200 and r.json().get("ok"): wh = True
+        except: pass
+    msg = "🚀 <b>تم التشغيل</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"📊 <b>العملات:</b> {', '.join(sorted(COINS.keys()))}\n"
+    msg += f"🔔 تنبيه عند تغير مفاجئ ≥ {ALERT_THRESHOLD}%\n\n"
+    msg += "📥 أرسل /start للبدء"
+    send_msg(msg)
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=self_ping, daemon=True).start()
-    def sched():
-        schedule.every().day.at(f"{DAILY_HOUR:02d}:00").do(send_daily)
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
-    threading.Thread(target=sched, daemon=True).start()
     if not wh:
         def poll():
             global last_id
@@ -441,11 +425,8 @@ def start_bot():
                         for u in r.json().get("result", []):
                             last_id = u.get("update_id", last_id)
                             handle_update(u)
-                    else:
-                        time.sleep(5)
-                except:
-                    time.sleep(5)
+                    else: time.sleep(5)
+                except: time.sleep(5)
         threading.Thread(target=poll, daemon=True).start()
 
-# هذا يبدأ البوت تلقائياً عند استيراد الملف بواسطة gunicorn
 start_bot()
